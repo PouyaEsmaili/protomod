@@ -34,7 +34,7 @@ def main():
                     with open(os.path.join(args.dest_dir, relative_path, file), 'w') as f:
                         f.write(output)
                     if "Not Implemented" in output:
-                        print(os.path.join(args.dest_dir, relative_path, file))
+                        print("Could not generate completely: " + os.path.join(args.dest_dir, relative_path, file))
                 except Exception as e:
                     print(os.path.join(args.dest_dir, relative_path, file))
                     print(e)
