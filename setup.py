@@ -5,7 +5,7 @@ with open('README.md') as f:
 
 setup(
     name='protomod',
-    version='1.0.1',
+    version='1.0.2',
     packages=['protomod'],
     license='MIT License',
     url='https://github.com/PouyaEsmaili/protomod',

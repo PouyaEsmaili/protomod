@@ -1,6 +1,6 @@
 import argparse
 import os
-from modifier import ProtoModifier
+from protomod.modifier import ProtoModifier
 
 
 def parse_input_argument():

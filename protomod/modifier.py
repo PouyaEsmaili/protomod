@@ -2,8 +2,8 @@ from io import StringIO
 from typing import Tuple, List, Optional
 
 from antlr4 import *
-from ProtobufLexer import ProtobufLexer
-from ProtobufParser import ProtobufParser
+from protomod.ProtobufLexer import ProtobufLexer
+from protomod.ProtobufParser import ProtobufParser
 
 
 class ProtoModifier:
