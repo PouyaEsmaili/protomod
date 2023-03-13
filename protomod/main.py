@@ -18,7 +18,6 @@ def parse_input_argument():
     return args
 
 
-
 def main():
     args = parse_input_argument()
     modifier = ProtoModifier(args.option_name)
@@ -38,7 +37,3 @@ def main():
                 except Exception as e:
                     print(os.path.join(args.dest_dir, relative_path, file))
                     print(e)
-
-
-if __name__ == '__main__':
-    main()
