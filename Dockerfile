@@ -7,4 +7,4 @@ RUN pip install -r /tmp/requirements.txt
 COPY . /code
 WORKDIR /code
 
-ENTRYPOINT ["python", "main.py"]
+ENTRYPOINT ["protomod"]
