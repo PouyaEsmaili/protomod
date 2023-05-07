@@ -108,7 +108,7 @@ class ProtoModifier:
             output.write(child.getText() + " ")
         child = node.importedFileName()
         imported_file_name = self.generate_imported_file_name(child)
-        should_render_this = imported_file_name[1:-1] in self.rendered_files# or imported_file_name.startswith('google/protobuf')
+        should_render_this = imported_file_name[1:-1] in self.rendered_files or imported_file_name[1:-1].startswith('google')
         output.write(imported_file_name)
         child = node.SEMICOLON()
         output.write(child.getText() + "\n")
