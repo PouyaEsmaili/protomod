@@ -1,23 +1,50 @@
+from dataclasses import dataclass
+from enum import Enum
 from io import StringIO
-from typing import Tuple, List, Optional
+from typing import Tuple, List, Optional, Dict
 
 from antlr4 import *
 from protomod.ProtobufLexer import ProtobufLexer
 from protomod.ProtobufParser import ProtobufParser
 
 
+class UsageNodeKind(Enum):
+    Rpc = "Rpc"
+    Message = "Message"
+    Enum = "Enum"
+    Extend = "Extend"
+
+
+@dataclass
+class UsageNode:
+    kind: UsageNodeKind
+    package: str
+    name: str
+    children: List["UsageNode"]
+    should_render: bool
+
+    def add_child(self, child: "UsageNode"):
+        self.children.append(child)
+
+
 class ProtoModifier:
     def __init__(self,
-                 include_rpc_with_option_names: Optional[List[str]] = None,
-                 allowed_message_names: Optional[List[str]] = None):
+                 include_rpc_with_option_names: Optional[List[str]] = None):
+        self.usage_nodes = dict()
         self.include_rpc_with_option_names = include_rpc_with_option_names
-        self.allowed_message_names = allowed_message_names
+        self.usage_graph_creation_phase = False
+        self.rendered_files = []
 
-    def get_used_message_names(self, tree: ProtobufParser.FileContext) -> List[str]:
-        _, used_message_names = self.generate_file(tree)
+    def create_usage_graph(self, tree: ProtobufParser.FileContext, empty_list=False) -> Dict[Tuple[str, str], UsageNode]:
+        self.usage_graph_creation_phase = True
+        if empty_list:
+            self.usage_nodes = dict()
+        self.generate_file(tree)
+        self.usage_graph_creation_phase = False
+        return self.usage_nodes
 
-    def regenerate_file(self, tree: ProtobufParser.FileContext) -> str:
-        return self.generate_file(tree)[0]
+    def regenerate_file(self, tree: ProtobufParser.FileContext) -> Tuple[str, bool]:
+        return self.generate_file(tree)
 
     def parse_file(self, addr: str) -> ProtobufParser.FileContext:
         input_stream = FileStream(addr, encoding="utf-8")
@@ -56,7 +83,9 @@ class ProtoModifier:
         for child in node.getTokens(ProtobufParser.PACKAGE):
             output.write(child.getText() + " ")
         for child in node.getTypedRuleContexts(ProtobufParser.PackageNameContext):
-            output.write(self.generate_package_name(child))
+            package_name = self.generate_package_name(child)
+            self.package_name = package_name
+            output.write(package_name)
         for child in node.getTokens(ProtobufParser.SEMICOLON):
             output.write(child.getText() + "\n")
         return output.getvalue()
@@ -67,17 +96,23 @@ class ProtoModifier:
             output.write(self.generate_string_literal(child))
         return output.getvalue()
 
-    def generate_import_decl(self, node: ProtobufParser.ImportDeclContext) -> str:
+    def generate_import_decl(self, node: ProtobufParser.ImportDeclContext) -> Tuple[str, bool]:
         output = StringIO()
-        for child in node.getTokens(ProtobufParser.IMPORT):
+        child = node.IMPORT()
+        output.write(child.getText() + " ")
+        child = node.WEAK()
+        if child is not None:
             output.write(child.getText() + " ")
-        for child in node.getTokens(ProtobufParser.WEAK) + node.getTokens(ProtobufParser.PUBLIC):
+        child = node.PUBLIC()
+        if child is not None:
             output.write(child.getText() + " ")
-        for child in node.getTypedRuleContexts(ProtobufParser.ImportedFileNameContext):
-            output.write(self.generate_imported_file_name(child))
-        for child in node.getTokens(ProtobufParser.SEMICOLON):
-            output.write(child.getText() + "\n")
-        return output.getvalue()
+        child = node.importedFileName()
+        imported_file_name = self.generate_imported_file_name(child)
+        should_render_this = imported_file_name[1:-1] in self.rendered_files# or imported_file_name.startswith('google/protobuf')
+        output.write(imported_file_name)
+        child = node.SEMICOLON()
+        output.write(child.getText() + "\n")
+        return output.getvalue(), should_render_this
 
     def generate_string_literal(self, node: ProtobufParser.StringLiteralContext) -> str:
         output = StringIO()
@@ -539,7 +574,8 @@ class ProtoModifier:
         output.write(child.getText() + "\n")
         return output.getvalue()
 
-    def generate_oneof_group_decl(self, node: ProtobufParser.OneofGroupDeclContext, indent=0) -> str:
+    def generate_oneof_group_decl(self, node: ProtobufParser.OneofGroupDeclContext, indent,
+                                  usage_parent: UsageNode) -> str:
         output = StringIO()
         child = node.GROUP()
         output.write(child.getText() + " ")
@@ -555,23 +591,24 @@ class ProtoModifier:
         child = node.L_BRACE()
         output.write(" " * indent * 2 + child.getText() + "\n")
         for child in node.getTypedRuleContexts(ProtobufParser.MessageElementContext):
-            output.write(self.generate_message_element(child, indent + 1))
+            output.write(self.generate_message_element(child, indent + 1, usage_parent))
         child = node.R_BRACE()
         output.write(" " * indent * 2 + child.getText() + "\n")
         return output.getvalue()
 
-    def generate_oneof_element(self, node: ProtobufParser.OneofElementContext, indent=0) -> str:
+    def generate_oneof_element(self, node: ProtobufParser.OneofElementContext, indent, usage_parent: UsageNode) -> str:
         output = StringIO()
         output.write(" " * indent * 2)
         child = node.optionDecl()
         if child is not None:
-            output.write(self.generate_option_decl(child))
+            option_decl, _ = self.generate_option_decl(child)
+            output.write(option_decl)
         child = node.oneofFieldDecl()
         if child is not None:
             output.write(self.generate_oneof_field_decl(child))
         child = node.oneofGroupDecl()
         if child is not None:
-            output.write(self.generate_oneof_group_decl(child, indent + 1))
+            output.write(self.generate_oneof_group_decl(child, indent + 1, usage_parent))
         return output.getvalue()
 
     def generate_map_key_type(self, node: ProtobufParser.MapKeyTypeContext) -> str:
@@ -580,7 +617,7 @@ class ProtoModifier:
         output.write(child.getText())
         return output.getvalue()
 
-    def generate_map_type(self, node: ProtobufParser.MapTypeContext) -> str:
+    def generate_map_type(self, node: ProtobufParser.MapTypeContext, usage_parent: UsageNode) -> str:
         output = StringIO()
         child = node.MAP()
         output.write(child.getText())
@@ -591,9 +628,13 @@ class ProtoModifier:
         child = node.COMMA()
         output.write(child.getText() + " ")
         child = node.typeName()
-        output.write(self.generate_type_name(child))
+        type_name = self.generate_type_name(child)
+        output.write(type_name)
         child = node.R_ANGLE()
         output.write(child.getText())
+
+        self.create_usage_node_from_type_name(type_name, usage_parent)
+
         return output.getvalue()
 
     def generate_service_name(self, node: ProtobufParser.ServiceNameContext) -> str:
@@ -608,7 +649,7 @@ class ProtoModifier:
         output.write(self.generate_ident(child))
         return output.getvalue()
 
-    def generate_message_type(self, node: ProtobufParser.MessageTypeContext) -> Tuple[str, str]:
+    def generate_message_type(self, node: ProtobufParser.MessageTypeContext, usage_parent: UsageNode) -> str:
         output = StringIO()
         child = node.L_PAREN()
         output.write(child.getText())
@@ -618,31 +659,35 @@ class ProtoModifier:
         child = node.typeName()
         type_name = self.generate_type_name(child)
         output.write(type_name)
+
+        self.create_usage_node_from_type_name(type_name, usage_parent)
+
         child = node.R_PAREN()
         output.write(child.getText())
-        return output.getvalue(), type_name
+        return output.getvalue()
 
-    def generate_input_type(self, node: ProtobufParser.InputTypeContext) -> Tuple[str, str]:
+    def generate_input_type(self, node: ProtobufParser.InputTypeContext, usage_parent: UsageNode) -> str:
         output = StringIO()
         child = node.messageType()
-        message_type, message_name = self.generate_message_type(child)
+        message_type = self.generate_message_type(child, usage_parent)
         output.write(message_type)
-        return output.getvalue(), message_name
+        return output.getvalue()
 
-    def generate_output_type(self, node: ProtobufParser.OutputTypeContext) -> Tuple[str, str]:
+    def generate_output_type(self, node: ProtobufParser.OutputTypeContext, usage_parent: UsageNode) -> str:
         output = StringIO()
         child = node.messageType()
-        message_type, message_name = self.generate_message_type(child)
+        message_type = self.generate_message_type(child, usage_parent)
         output.write(message_type)
-        return output.getvalue(), message_name
+        return output.getvalue()
 
-    def generate_field_decl(self, node: ProtobufParser.FieldDeclContext) -> str:
+    def generate_field_decl(self, node: ProtobufParser.FieldDeclContext, usage_parent: UsageNode) -> str:
         output = StringIO()
         child = node.fieldCardinality()
         if child is not None:
             output.write(self.generate_field_cardinality(child) + " ")
         child = node.typeName()
-        output.write(self.generate_type_name(child) + " ")
+        type_name = self.generate_type_name(child)
+        output.write(type_name + " ")
         child = node.fieldName()
         output.write(self.generate_field_name(child) + " ")
         child = node.EQUALS()
@@ -654,9 +699,12 @@ class ProtoModifier:
             output.write(" " + self.generate_compact_options(child))
         child = node.SEMICOLON()
         output.write(child.getText() + "\n")
+
+        self.create_usage_node_from_type_name(type_name, usage_parent)
+
         return output.getvalue()
 
-    def generate_group_decl(self, node: ProtobufParser.GroupDeclContext, indent=0) -> str:
+    def generate_group_decl(self, node: ProtobufParser.GroupDeclContext, indent, usage_parent: UsageNode) -> str:
         output = StringIO()
         child = node.fieldCardinality()
         if child is not None:
@@ -675,12 +723,12 @@ class ProtoModifier:
         child = node.L_BRACE()
         output.write(" " * indent * 2 + child.getText() + "\n")
         for child in node.getTypedRuleContexts(ProtobufParser.MessageElementContext):
-            output.write(self.generate_message_element(child, indent + 1))
+            output.write(self.generate_message_element(child, indent + 1, usage_parent))
         child = node.R_BRACE()
         output.write(" " * indent * 2 + child.getText() + "\n")
         return output.getvalue()
 
-    def generate_oneof_decl(self, node: ProtobufParser.OneofDeclContext, indent=0) -> str:
+    def generate_oneof_decl(self, node: ProtobufParser.OneofDeclContext, indent, usage_parent: UsageNode) -> str:
         output = StringIO()
         child = node.ONEOF()
         output.write(child.getText() + " ")
@@ -689,7 +737,7 @@ class ProtoModifier:
         child = node.L_BRACE()
         output.write(child.getText() + "\n")
         for child in node.getTypedRuleContexts(ProtobufParser.OneofElementContext):
-            output.write(self.generate_oneof_element(child, indent + 1))
+            output.write(self.generate_oneof_element(child, indent + 1, usage_parent))
         child = node.R_BRACE()
         output.write(" " * indent * 2 + child.getText() + "\n")
         return output.getvalue()
@@ -758,15 +806,16 @@ class ProtoModifier:
         output.write(self.generate_type_name(child))
         return output.getvalue()
 
-    def generate_extension_element(self, node: ProtobufParser.ExtensionElementContext, indent=0):
+    def generate_extension_element(self, node: ProtobufParser.ExtensionElementContext, indent,
+                                   usage_parent: UsageNode):
         output = StringIO()
         output.write(" " * indent * 2)
         child = node.fieldDecl()
         if child is not None:
-            output.write(self.generate_field_decl(child))
+            output.write(self.generate_field_decl(child, usage_parent))
         child = node.groupDecl()
         if child is not None:
-            output.write(self.generate_group_decl(child))
+            output.write(self.generate_group_decl(child, usage_parent))
         return output.getvalue()
 
     def generate_message_reserved_decl(self, node: ProtobufParser.MessageReservedDeclContext) -> str:
@@ -783,39 +832,48 @@ class ProtoModifier:
         output.write(child.getText() + "\n")
         return output.getvalue()
 
-    def generate_enum_decl(self, node: ProtobufParser.EnumDeclContext, indent=0) -> str:
+    def generate_enum_decl(self, node: ProtobufParser.EnumDeclContext, indent=0) -> Tuple[str, bool]:
         output = StringIO()
         output.write(" " * indent * 2)
         child = node.ENUM()
         output.write(child.getText() + " ")
         child = node.enumName()
-        output.write(self.generate_enum_name(child) + " ")
+        name = self.generate_enum_name(child)
+        output.write(name + " ")
+
+        usage_node = self.create_usage_node_from_type_name(name, None, UsageNodeKind.Enum)
+        should_render_this = self.determine_node_state(usage_node)
+
         child = node.L_BRACE()
         output.write(child.getText() + "\n")
         for child in node.getTypedRuleContexts(ProtobufParser.EnumElementContext):
             output.write(self.generate_enum_element(child, indent + 1))
         child = node.R_BRACE()
         output.write(" " * indent * 2 + child.getText() + "\n")
-        return output.getvalue()
+        return output.getvalue(), should_render_this
 
     def generate_extension_decl(self, node: ProtobufParser.ExtensionDeclContext, indent=0) -> str:
         output = StringIO()
         child = node.EXTEND()
         output.write(child.getText() + " ")
         child = node.extendedMessage()
-        output.write(self.generate_extended_message(child) + " ")
+        type_name = self.generate_extended_message(child)
+        output.write(type_name + " ")
         child = node.L_BRACE()
         output.write(child.getText() + "\n")
+
+        usage_node = self.create_usage_node_from_type_name(type_name, None, UsageNodeKind.Extend)
+
         for child in node.getTypedRuleContexts(ProtobufParser.ExtensionElementContext):
-            output.write(self.generate_extension_element(child, indent + 1))
+            output.write(self.generate_extension_element(child, indent + 1, usage_node))
         child = node.R_BRACE()
         output.write(" " * indent * 2 + child.getText() + "\n")
         return output.getvalue()
 
-    def generate_map_field_decl(self, node: ProtobufParser.MapFieldDeclContext) -> str:
+    def generate_map_field_decl(self, node: ProtobufParser.MapFieldDeclContext, usage_parent: UsageNode) -> str:
         output = StringIO()
         child = node.mapType()
-        output.write(self.generate_map_type(child) + " ")
+        output.write(self.generate_map_type(child, usage_parent) + " ")
         child = node.fieldName()
         output.write(self.generate_field_name(child) + " ")
         child = node.EQUALS()
@@ -829,16 +887,17 @@ class ProtoModifier:
         output.write(child.getText() + "\n")
         return output.getvalue()
 
-    def generate_message_element(self, node: ProtobufParser.MessageElementContext, indent=0) -> str:
+    def generate_message_element(self, node: ProtobufParser.MessageElementContext, indent,
+                                 usage_parent: UsageNode) -> str:
         output = StringIO()
         output.write(" " * indent * 2)
         for child in node.getChildren():
             if isinstance(child, ProtobufParser.FieldDeclContext):
-                output.write(self.generate_field_decl(child))
+                output.write(self.generate_field_decl(child, usage_parent))
             elif isinstance(child, ProtobufParser.GroupDeclContext):
-                output.write(self.generate_group_decl(child))
+                output.write(self.generate_group_decl(child, indent, usage_parent))
             elif isinstance(child, ProtobufParser.OneofDeclContext):
-                output.write(self.generate_oneof_decl(child, indent))
+                output.write(self.generate_oneof_decl(child, indent, usage_parent))
             elif isinstance(child, ProtobufParser.OptionDeclContext):
                 output.write(self.generate_option_decl(child)[0])
             elif isinstance(child, ProtobufParser.ExtensionRangeDeclContext):
@@ -846,32 +905,38 @@ class ProtoModifier:
             elif isinstance(child, ProtobufParser.MessageReservedDeclContext):
                 output.write(self.generate_message_reserved_decl(child))
             elif isinstance(child, ProtobufParser.MessageDeclContext):
-                output.write(self.generate_message_decl(child, indent)[0])
+                output.write(self.generate_message_decl(child, indent, usage_parent)[0])
             elif isinstance(child, ProtobufParser.EnumDeclContext):
-                output.write(self.generate_enum_decl(child))
+                output.write(self.generate_enum_decl(child)[0])
             elif isinstance(child, ProtobufParser.ExtensionDeclContext):
                 output.write(self.generate_extension_decl(child, indent))
             elif isinstance(child, ProtobufParser.MapFieldDeclContext):
-                output.write(self.generate_map_field_decl(child))
+                output.write(self.generate_map_field_decl(child, usage_parent))
             elif isinstance(child, ProtobufParser.EmptyDeclContext):
                 output.write(self.generate_empty_decl(child))
         return output.getvalue()
 
-    def generate_message_decl(self, node: ProtobufParser.MessageDeclContext, indent=0) -> Tuple[str, bool]:
-        should_render_this = True
+    def generate_message_decl(self, node: ProtobufParser.MessageDeclContext, indent=0, usage_parent: UsageNode = None) \
+            -> Tuple[str, bool]:
         output = StringIO()
         child = node.MESSAGE()
         output.write(child.getText() + " ")
         child = node.messageName()
+
+        usage_node = self.create_usage_node_from_type_name(child.getText(), usage_parent)
+        should_render_this = self.determine_node_state(usage_node)
+
         message_name = self.generate_message_name(child)
         output.write(message_name + " ")
-        should_render_this = should_render_this or message_name in self.allowed_message_names
         child = node.L_BRACE()
         output.write(child.getText() + "\n")
         for child in node.getTypedRuleContexts(ProtobufParser.MessageElementContext):
-            output.write(self.generate_message_element(child, indent + 1))
+            output.write(self.generate_message_element(child, indent + 1, usage_node))
         child = node.R_BRACE()
         output.write(" " * indent * 2 + child.getText() + "\n")
+
+        self.create_usage_node_from_type_name(message_name, usage_parent)
+
         return output.getvalue(), should_render_this
 
     def generate_method_element(self, node: ProtobufParser.MethodElementContext, indent=0) -> Tuple[str, bool]:
@@ -888,23 +953,24 @@ class ProtoModifier:
             output.write(self.generate_empty_decl(child))
         return output.getvalue(), should_render_this
 
-    def generate_method_decl(self, node: ProtobufParser.MethodDeclContext, indent=0) -> Tuple[str, bool, List[str]]:
+    def generate_method_decl(self, node: ProtobufParser.MethodDeclContext, indent=0) -> Tuple[str, bool]:
         should_render_this = False
-        message_names = []
         output = StringIO()
         child = node.RPC()
         output.write(child.getText() + " ")
         child = node.methodName()
-        output.write(self.generate_method_name(child))
+        method_name = self.generate_method_name(child)
+        output.write(method_name)
+
+        usage_node = self.create_usage_node_from_type_name(method_name, None, UsageNodeKind.Rpc)
+
         child = node.inputType()
-        input_type, message_name = self.generate_input_type(child)
-        message_names.append(message_name)
+        input_type = self.generate_input_type(child, usage_node)
         output.write(input_type + " ")
         child = node.RETURNS()
         output.write(child.getText() + " ")
         child = node.outputType()
-        output_type, message_name = self.generate_output_type(child)
-        message_names.append(message_name)
+        output_type = self.generate_output_type(child, usage_node)
         output.write(output_type)
         child = node.SEMICOLON()
         if child is not None:
@@ -918,12 +984,12 @@ class ProtoModifier:
                 output.write(res)
             child = node.R_BRACE()
             output.write(" " * indent * 2 + child.getText() + "\n")
-        return output.getvalue(), should_render_this, message_names
 
-    def generate_service_element(self, node: ProtobufParser.ServiceElementContext, indent=0) -> Tuple[
-        str, bool, List[str]]:
+        usage_node.should_render = should_render_this
+        return output.getvalue(), should_render_this
+
+    def generate_service_element(self, node: ProtobufParser.ServiceElementContext, indent=0) -> Tuple[str, bool]:
         should_render_this = False
-        message_names = []
         output = StringIO()
         output.write(" " * indent * 2)
         child = node.optionDecl()
@@ -931,17 +997,16 @@ class ProtoModifier:
             output.write(self.generate_option_decl(child)[0])
         child = node.methodDecl()
         if child is not None:
-            res, should_render, message_names = self.generate_method_decl(child, indent)
+            res, should_render = self.generate_method_decl(child, indent)
             should_render_this = should_render or should_render_this
             output.write(res if should_render else "")
         child = node.emptyDecl()
         if child is not None:
             output.write(self.generate_empty_decl(child))
-        return output.getvalue(), should_render_this, message_names
+        return output.getvalue(), should_render_this
 
-    def generate_service_decl(self, node: ProtobufParser.ServiceDeclContext, indent=0) -> Tuple[str, bool, List[str]]:
+    def generate_service_decl(self, node: ProtobufParser.ServiceDeclContext, indent=0) -> Tuple[str, bool]:
         should_render_this = False
-        message_names = []
         output = StringIO()
         output.write(" " * indent * 2)
         child = node.SERVICE()
@@ -951,48 +1016,113 @@ class ProtoModifier:
         child = node.L_BRACE()
         output.write(child.getText() + "\n")
         for child in node.getTypedRuleContexts(ProtobufParser.ServiceElementContext):
-            res, should_render, _message_names = self.generate_service_element(child, indent + 1)
-            message_names += _message_names
+            res, should_render = self.generate_service_element(child, indent + 1)
             should_render_this = should_render or should_render_this
             output.write(res if should_render else "")
         child = node.R_BRACE()
         output.write(" " * indent * 2 + child.getText() + "\n")
-        return output.getvalue(), should_render_this, message_names
+        return output.getvalue(), should_render_this
 
-    def generate_file_element(self, node: ProtobufParser.FileElementContext) -> Tuple[str, List[str]]:
-        message_names = []
+    def generate_file_element(self, node: ProtobufParser.FileElementContext) -> Tuple[str, bool]:
+        should_render_this = False
         output = StringIO()
         for child in node.getChildren():
             if isinstance(child, ProtobufParser.ImportDeclContext):
-                output.write(self.generate_import_decl(child))
+                res, should_render = self.generate_import_decl(child)
+                output.write(res if should_render else "")
             elif isinstance(child, ProtobufParser.PackageDeclContext):
                 output.write(self.generate_package_decl(child))
             elif isinstance(child, ProtobufParser.OptionDeclContext):
                 output.write(self.generate_option_decl(child)[0])
             elif isinstance(child, ProtobufParser.MessageDeclContext):
                 res, should_render = self.generate_message_decl(child)
+                should_render_this = should_render_this or should_render
                 output.write(res if should_render else "")
             elif isinstance(child, ProtobufParser.EnumDeclContext):
-                output.write(self.generate_enum_decl(child))
+                res, should_render = self.generate_enum_decl(child)
+                should_render_this = should_render_this or should_render
+                output.write(res if should_render else "")
             elif isinstance(child, ProtobufParser.ExtensionDeclContext):
                 output.write(self.generate_extension_decl(child))
             elif isinstance(child, ProtobufParser.ServiceDeclContext):
-                res, should_render, message_names = self.generate_service_decl(child)
+                res, should_render = self.generate_service_decl(child)
+                should_render_this = should_render_this or should_render
                 output.write(res)
             elif isinstance(child, ProtobufParser.EmptyDeclContext):
                 output.write(self.generate_empty_decl(child))
             else:
                 output.write("!!Error!!")
-        return output.getvalue(), message_names
+        return output.getvalue(), should_render_this
 
-    def generate_file(self, node: ProtobufParser.FileContext) -> Tuple[str, List[str]]:
-        message_names = []
+    def generate_file(self, node: ProtobufParser.FileContext) -> Tuple[str, bool]:
+        should_render_this = False
         output = StringIO()
         for child in node.getTokens(ProtobufParser.BYTE_ORDER_MARK):
             output.write(child.getText())
         for child in node.getTypedRuleContexts(ProtobufParser.SyntaxDeclContext):
             output.write(self.generate_syntax_decl(child))
         for child in node.getTypedRuleContexts(ProtobufParser.FileElementContext):
-            res, message_names = self.generate_file_element(child)
+            res, should_render = self.generate_file_element(child)
+            should_render_this = should_render_this or should_render
             output.write(res)
-        return output.getvalue(), message_names
+        return output.getvalue(), should_render_this
+
+    def create_usage_node_from_type_name(
+            self, type_name: str, usage_parent: Optional[UsageNode], kind: Optional[UsageNodeKind] = None
+    ) -> Optional[UsageNode]:
+        parts = type_name.split(".")
+        if parts[-1] in [
+            'bool', 'string', 'bytes', 'float', 'double',
+            'int32', 'int64', 'uint32', 'uint64', 'sint32',
+            'sint64', 'fixed32', 'fixed64', 'sfixed32', 'sfixed64'
+        ]:
+            return None
+
+        if len(parts) > 1:
+            package_name_parts = list(filter(lambda x: x[0].islower(), parts))
+            message_name_parts = list(filter(lambda x: x[0].isupper(), parts))
+            if len(package_name_parts) > 0:
+                package_name = '.'.join(package_name_parts)
+            else:
+                package_name = self.package_name
+
+            for message_name in message_name_parts[:-1]:
+                usage_node = self.create_usage_node_from_type_name(f'{package_name}.{message_name}', usage_parent, kind)
+                usage_parent = usage_node
+            message_name = message_name_parts[-1]
+        else:
+            package_name = self.package_name
+            message_name = type_name
+
+        if self.usage_graph_creation_phase:
+            if (package_name, message_name) in self.usage_nodes:
+                usage_node = self.usage_nodes[(package_name, message_name)]
+                if kind:
+                    usage_node.kind = kind
+            else:
+                usage_node = UsageNode(kind or UsageNodeKind.Message, package_name, message_name, [], False)
+                self.usage_nodes[(package_name, message_name)] = usage_node
+
+            if usage_parent:
+                usage_parent.add_child(usage_node)
+
+            return usage_node
+        else:
+            return self.usage_nodes[(package_name, message_name)] or None
+
+    def update_should_render_state(self):
+        for usage_node in self.usage_nodes.values():
+            if usage_node.kind == UsageNodeKind.Rpc and usage_node.should_render:
+                self.update_should_render_state_each(usage_node)
+            if usage_node.package == 'google.protobuf':
+                usage_node.should_render = True
+                self.update_should_render_state_each(usage_node)
+
+    def update_should_render_state_each(self, usage_node):
+        for usage_node in usage_node.children:
+            if not usage_node.should_render:
+                usage_node.should_render = True
+                self.update_should_render_state_each(usage_node)
+
+    def determine_node_state(self, usage_node: Optional[UsageNode]) -> bool:
+        return usage_node.should_render or False
