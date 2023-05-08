@@ -47,7 +47,7 @@ def main():
                         f.write(output)
                     if "Not Implemented" in output:
                         print("Could not generate completely: " + os.path.join(args.dest_dir, relative_path, file))
-                elif dry_run:
+                elif should_render and dry_run:
                     modifier.rendered_files.append(os.path.join(relative_path, file))
             except Exception as e:
                 print(os.path.join(args.dest_dir, relative_path, file))
