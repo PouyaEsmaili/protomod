@@ -19,6 +19,7 @@ class UsageNodeKind(Enum):
 class UsageNode:
     kind: UsageNodeKind
     package: str
+    group: str
     name: str
     children: List["UsageNode"]
     should_render: bool
@@ -953,7 +954,7 @@ class ProtoModifier:
             output.write(self.generate_empty_decl(child))
         return output.getvalue(), should_render_this
 
-    def generate_method_decl(self, node: ProtobufParser.MethodDeclContext, indent=0) -> Tuple[str, bool]:
+    def generate_method_decl(self, node: ProtobufParser.MethodDeclContext, group_name: str, indent=0) -> Tuple[str, bool]:
         should_render_this = False
         output = StringIO()
         child = node.RPC()
@@ -962,7 +963,7 @@ class ProtoModifier:
         method_name = self.generate_method_name(child)
         output.write(method_name)
 
-        usage_node = self.create_usage_node_from_type_name(method_name, None, UsageNodeKind.Rpc)
+        usage_node = self.create_usage_node_from_type_name(method_name, None, UsageNodeKind.Rpc, group_name)
 
         child = node.inputType()
         input_type = self.generate_input_type(child, usage_node)
@@ -988,7 +989,7 @@ class ProtoModifier:
         usage_node.should_render = should_render_this
         return output.getvalue(), should_render_this
 
-    def generate_service_element(self, node: ProtobufParser.ServiceElementContext, indent=0) -> Tuple[str, bool]:
+    def generate_service_element(self, node: ProtobufParser.ServiceElementContext, group_name: str, indent=0) -> Tuple[str, bool]:
         should_render_this = False
         output = StringIO()
         output.write(" " * indent * 2)
@@ -997,7 +998,7 @@ class ProtoModifier:
             output.write(self.generate_option_decl(child)[0])
         child = node.methodDecl()
         if child is not None:
-            res, should_render = self.generate_method_decl(child, indent)
+            res, should_render = self.generate_method_decl(child, group_name, indent)
             should_render_this = should_render or should_render_this
             output.write(res if should_render else "")
         child = node.emptyDecl()
@@ -1012,11 +1013,12 @@ class ProtoModifier:
         child = node.SERVICE()
         output.write(child.getText() + " ")
         child = node.serviceName()
-        output.write(self.generate_service_name(child) + " ")
+        service_name = self.generate_service_name(child)
+        output.write(service_name + " ")
         child = node.L_BRACE()
         output.write(child.getText() + "\n")
         for child in node.getTypedRuleContexts(ProtobufParser.ServiceElementContext):
-            res, should_render = self.generate_service_element(child, indent + 1)
+            res, should_render = self.generate_service_element(child, service_name, indent + 1)
             should_render_this = should_render or should_render_this
             output.write(res if should_render else "")
         child = node.R_BRACE()
@@ -1068,7 +1070,8 @@ class ProtoModifier:
         return output.getvalue(), should_render_this
 
     def create_usage_node_from_type_name(
-            self, type_name: str, usage_parent: Optional[UsageNode], kind: Optional[UsageNodeKind] = None
+            self, type_name: str, usage_parent: Optional[UsageNode],
+            kind: Optional[UsageNodeKind] = None, group_name: str = '',
     ) -> Optional[UsageNode]:
         parts = type_name.split(".")
         if parts[-1] in [
@@ -1089,26 +1092,27 @@ class ProtoModifier:
             for message_name in message_name_parts[:-1]:
                 usage_node = self.create_usage_node_from_type_name(f'{package_name}.{message_name}', usage_parent, kind)
                 usage_parent = usage_node
+            group_name = '.'.join(message_name_parts[:-1]) if len(message_name_parts) > 1 else group_name
             message_name = message_name_parts[-1]
         else:
             package_name = self.package_name
             message_name = type_name
 
         if self.usage_graph_creation_phase:
-            if (package_name, message_name) in self.usage_nodes:
-                usage_node = self.usage_nodes[(package_name, message_name)]
+            if (package_name, group_name, message_name) in self.usage_nodes:
+                usage_node = self.usage_nodes[(package_name, group_name, message_name)]
                 if kind:
                     usage_node.kind = kind
             else:
-                usage_node = UsageNode(kind or UsageNodeKind.Message, package_name, message_name, [], False)
-                self.usage_nodes[(package_name, message_name)] = usage_node
+                usage_node = UsageNode(kind or UsageNodeKind.Message, package_name, group_name, message_name, [], False)
+                self.usage_nodes[(package_name, group_name, message_name)] = usage_node
 
             if usage_parent:
                 usage_parent.add_child(usage_node)
 
             return usage_node
         else:
-            return self.usage_nodes[(package_name, message_name)] or None
+            return self.usage_nodes[(package_name, group_name, message_name)] or None
 
     def update_should_render_state(self):
         for usage_node in self.usage_nodes.values():
