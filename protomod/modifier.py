@@ -558,10 +558,14 @@ class ProtoModifier:
         output.write(self.generate_ident(child))
         return output.getvalue()
 
-    def generate_oneof_field_decl(self, node: ProtobufParser.OneofFieldDeclContext) -> str:
+    def generate_oneof_field_decl(self, node: ProtobufParser.OneofFieldDeclContext, usage_parent: UsageNode) -> str:
         output = StringIO()
         child = node.typeName()
-        output.write(self.generate_type_name(child) + " ")
+        type_name = self.generate_type_name(child)
+
+        self.create_usage_node_from_type_name(type_name, usage_parent)
+
+        output.write(type_name + " ")
         child = node.fieldName()
         output.write(self.generate_field_name(child) + " ")
         child = node.EQUALS()
@@ -606,7 +610,7 @@ class ProtoModifier:
             output.write(option_decl)
         child = node.oneofFieldDecl()
         if child is not None:
-            output.write(self.generate_oneof_field_decl(child))
+            output.write(self.generate_oneof_field_decl(child, usage_parent))
         child = node.oneofGroupDecl()
         if child is not None:
             output.write(self.generate_oneof_group_decl(child, indent + 1, usage_parent))
